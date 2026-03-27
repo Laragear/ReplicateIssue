@@ -4,10 +4,12 @@
 echo "Checking for available Laragear packages..."
 REPOS_JSON=$(curl -s "https://api.github.com/orgs/Laragear/repos?per_page=100")
 
-# Filter out archived repos and extract names
-PACKAGES=$(echo "$REPOS_JSON" | grep -E '"archived": false|"name":' | \
-    awk '/"name":/ {name=$2} /"archived": false/ {print name}' | \
-    tr -d '",')
+if command -v jq &> /dev/null; then
+    PACKAGES=$(echo "$REPOS_JSON" | jq -r '.[] | select(.archived == false) | .name')
+else
+    # Improved fallback: finds name, checks if following archived is false
+    PACKAGES=$(echo "$REPOS_JSON" | grep -B 1 '"archived": false' | grep '"name":' | sed -E 's/.*"name": "([^"]+)".*/\1/')
+fi
 
 if [ -z "$PACKAGES" ]; then
     echo "Error: Could not fetch packages from Laragear GitHub."
@@ -15,20 +17,23 @@ if [ -z "$PACKAGES" ]; then
 fi
 
 echo "Select a Laragear package for the reproduction:"
+PS3="Enter number: "
+# IMPORTANT: Connect stdin to the terminal for the select menu
 select PACKAGE_NAME in $PACKAGES; do
-    if [ -n "$PACKAGE_NAME" ]; then
-        break
-    else
-        echo "Invalid selection."
-    fi
-done
+    if [ -n "$PACKAGE_NAME" ]; then break; else echo "Invalid selection."; fi
+done < /dev/tty
 
 # --- 2. Determine Directory ---
 REPO_NAME="${PACKAGE_NAME}-issue"
 DEFAULT_DIR="$HOME/projects/$REPO_NAME"
-read -p "Where should the project be created? [$DEFAULT_DIR]: " PROJECT_DIR
+
+# IMPORTANT: Connect stdin to the terminal for the read prompt
+echo -n "Where should the project be created? [$DEFAULT_DIR]: "
+read -r PROJECT_DIR < /dev/tty
 PROJECT_DIR=${PROJECT_DIR:-$DEFAULT_DIR}
 
+# Resolve absolute path in case user used ~/
+PROJECT_DIR="${PROJECT_DIR/#\~/$HOME}"
 mkdir -p "$PROJECT_DIR"
 PARENT_DIR=$(dirname "$PROJECT_DIR")
 BASE_NAME=$(basename "$PROJECT_DIR")
@@ -50,68 +55,71 @@ fi
 
 # --- 4. Execute Project Creation ---
 if [ -n "$COMPOSER_CMD" ]; then
-    echo "Creating Laravel project and requiring Laragear/$PACKAGE_NAME..."
-
+    echo "Creating Laravel project: $BASE_NAME..."
+    
+    # We execute from the parent dir to ensure create-project works with the folder name
+    cd "$PARENT_DIR" || exit
     $COMPOSER_CMD create-project laravel/laravel "$BASE_NAME"
+    
     cd "$PROJECT_DIR" || exit
-
-    # Re-run composer within the new folder to add the Laragear package
+    echo "Requiring laragear/$PACKAGE_NAME..."
+    
     if [[ $COMPOSER_CMD == *"docker"* || $COMPOSER_CMD == *"podman"* ]]; then
+        # Inside the container, we are already in /app (the project dir)
         ${COMPOSER_CMD%composer} composer require "laragear/$PACKAGE_NAME"
     else
         $COMPOSER_CMD require "laragear/$PACKAGE_NAME"
     fi
 else
-    echo "--------------------------------------------------------"
-    echo "No suitable environment found. Run manually:"
-    echo "composer create-project laravel/laravel $PROJECT_DIR"
-    echo "cd $PROJECT_DIR && composer require laragear/$PACKAGE_NAME"
-    echo "--------------------------------------------------------"
+    echo "No suitable environment found. Install Composer, PHP, or Docker."
     exit 1
 fi
 
 # --- 5. Create publish.sh ---
-cat <<EOF > "$PROJECT_DIR/publish.sh"
+# We use 'EOF' to ensure $ variables are not evaluated until publish.sh is run.
+cat <<'EOF' > "publish.sh"
 #!/bin/bash
+REPO_NAME=$(basename "$(pwd)")
+GITHUB_USER=$(git config user.name)
+DEFAULT_REMOTE="https://github.com/${GITHUB_USER}/${REPO_NAME}.git"
 
-REPO_NAME="$REPO_NAME"
-GITHUB_USER=\$(git config user.name)
-DEFAULT_REMOTE="https://github./\$GITHUB_USER/\$REPO_NAME.git"
-
-echo "Do you want to create a repository in GitHub for this issue?"
-read -p "(y/n): " CONFIRM
-
-if [[ \$CONFIRM =~ ^[Yy]$ ]]; then
-    echo "--------------------------------------------------------"
-    echo "Please go to https://github.com/new and create: \$REPO_NAME"
-    echo "Waiting... Press [Enter] once the repository is created."
-    read -s
-
-    read -p "Enter remote URL [\$DEFAULT_REMOTE]: " REMOTE_URL
-    REMOTE_URL=\${REMOTE_URL:-\$DEFAULT_REMOTE}
-
+if [ ! -d ".git" ]; then
     git init
     git add .
-    git commit -m "Initial reproduction state for laragear/\$PACKAGE_NAME"
-    git branch -M main
-    git remote add origin "\$REMOTE_URL"
+    git commit -m "Initial reproduction state"
+fi
 
-    echo "Pushing to GitHub..."
+# 1. Try GitHub CLI
+if command -v gh &> /dev/null; then
+    read -p "Do you want to create a repository '$REPO_NAME' on GitHub? (y/n): " confirm
+    if [[ $confirm == [yY] ]]; then
+        gh repo create "$REPO_NAME" --public --source=. --push
+        echo "Successfully published via gh!"
+        exit 0
+    fi
+fi
+
+# 2. Manual Fallback
+read -p "Create the repository manually on GitHub? (y/n): " manual_confirm
+if [[ $manual_confirm == [yY] ]]; then
+    echo "Go to: https://github.com/new and create '$REPO_NAME'"
+    echo "Press [ENTER] once created..."
+    read -r
+    
+    read -p "Enter remote URL [$DEFAULT_REMOTE]: " REMOTE_URL
+    REMOTE_URL=${REMOTE_URL:-$DEFAULT_REMOTE}
+    
+    git remote add origin "$REMOTE_URL"
+    git branch -M main
     git push -u origin main
-    echo "Done!"
 else
-    echo "--------------------------------------------------------"
-    echo "Automatic upload cancelled. To do it manually, run:"
-    echo "  git init"
-    echo "  git add ."
-    echo "  git commit -m \"Initial commit\""
-    echo "  git remote add origin <your-repo-url>"
+    echo "Manual commands:"
+    echo "  git remote add origin <url>"
     echo "  git push -u origin main"
-    echo "--------------------------------------------------------"
 fi
 EOF
 
-chmod +x "$PROJECT_DIR/publish.sh"
+chmod +x "publish.sh"
 
 echo "---"
 echo "Success! Project created at $PROJECT_DIR"
