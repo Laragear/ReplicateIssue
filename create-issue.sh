@@ -23,6 +23,8 @@ select PACKAGE_NAME in $PACKAGES; do
     if [ -n "$PACKAGE_NAME" ]; then break; else echo "Invalid selection."; fi
 done < /dev/tty
 
+COMPOSER_PACKAGE="laragear/$(echo "$PACKAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+
 # --- 2. Determine Directory ---
 REPO_NAME="${PACKAGE_NAME}-issue"
 DEFAULT_DIR="$HOME/projects/$REPO_NAME"
@@ -63,12 +65,12 @@ if [ -n "$COMPOSER_CMD" ]; then
     
     cd "$PROJECT_DIR" || exit
     echo "Requiring laragear/$PACKAGE_NAME..."
-    
+
     if [[ $COMPOSER_CMD == *"docker"* || $COMPOSER_CMD == *"podman"* ]]; then
         # Inside the container, we are already in /app (the project dir)
-        ${COMPOSER_CMD%composer} composer require "laragear/$PACKAGE_NAME"
+        ${COMPOSER_CMD%composer} composer require "$COMPOSER_PACKAGE"
     else
-        $COMPOSER_CMD require "laragear/$PACKAGE_NAME"
+        $COMPOSER_CMD require "$COMPOSER_PACKAGE"
     fi
 else
     echo "No suitable environment found. Install Composer, PHP, or Docker."
